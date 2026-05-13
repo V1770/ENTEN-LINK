@@ -148,22 +148,37 @@ class BeatReceiver:
 
     async def listen(self, stop_event: asyncio.Event) -> None:
         loop = asyncio.get_running_loop()
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except (AttributeError, OSError):
-            pass  # SO_REUSEPORT absent or unsupported on this platform/Python version
-        try:
-            sock.bind(("", PORT_BEAT))
-        except OSError as exc:
-            log.error(
-                "Beat receiver could not bind to UDP :%d — %s. "
-                "Is another DJ app (Rekordbox, previous instance) using this port?",
-                PORT_BEAT, exc,
-            )
-            sock.close()
-            raise
+
+        # Retry binding up to 3 times — port 50001 may be briefly held by a
+        # previous instance or the Windows dynamic port allocator.
+        sock = None
+        for attempt in range(3):
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except (AttributeError, OSError):
+                pass
+            try:
+                s.bind(("", PORT_BEAT))
+                sock = s
+                break
+            except OSError as exc:
+                s.close()
+                if attempt < 2:
+                    log.warning(
+                        "Beat receiver: UDP :%d bind failed (attempt %d/3): %s — retrying in 2s",
+                        PORT_BEAT, attempt + 1, exc,
+                    )
+                    await asyncio.sleep(2.0)
+                else:
+                    log.error(
+                        "Beat receiver could not bind to UDP :%d — %s. "
+                        "Check Windows Firewall or run the installer to add firewall rules. "
+                        "Beat/position packets will not be received.",
+                        PORT_BEAT, exc,
+                    )
+                    raise
 
         transport, _ = await loop.create_datagram_endpoint(
             lambda: _BeatProtocol(self._bus, self._parser),

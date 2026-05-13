@@ -48,11 +48,19 @@ Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; \
     Flags: nowait postinstall skipifsilent
 
 ; ── Open the three DJ Link UDP ports in the Windows firewall ──
-Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Pioneer DJ Link (UDP 50000-50002)"" dir=in action=allow protocol=UDP localport=50000-50002 program=""{app}\{#AppExeName}"""; \
+; Rule WITHOUT program= filter so it works regardless of install path.
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Pioneer DJ Link UDP"" > nul 2>&1"; \
     Flags: runhidden
-Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Pioneer DJ Link (UDP 50000-50002 out)"" dir=out action=allow protocol=UDP localport=50000-50002 program=""{app}\{#AppExeName}"""; \
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Pioneer DJ Link UDP"" dir=in action=allow protocol=UDP localport=50000-50002"; \
+    Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Pioneer DJ Link UDP out"" dir=out action=allow protocol=UDP localport=50000-50002"; \
+    Flags: runhidden
+; Reserve ports 50000-50002 from the Windows dynamic (ephemeral) port range so
+; Hyper-V / WireGuard / Tailscale cannot grab them before our sockets bind.
+Filename: "netsh"; Parameters: "int ipv4 add excludedportrange udp 50000 3"; \
     Flags: runhidden
 
 [UninstallRun]
-Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Pioneer DJ Link (UDP 50000-50002)"""; Flags: runhidden
-Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Pioneer DJ Link (UDP 50000-50002 out)"""; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Pioneer DJ Link UDP"""; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Pioneer DJ Link UDP out"""; Flags: runhidden
+Filename: "netsh"; Parameters: "int ipv4 delete excludedportrange udp 50000 3"; Flags: runhidden
