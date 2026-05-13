@@ -116,7 +116,7 @@ def _parse_ipconfig_interfaces() -> list[tuple[str, str, str, bytes, bool]]:
         header = re.match(r"^(.+adapter|.+interface)\s+(.+):\s*$", block, re.IGNORECASE)
         iface = header.group(2).strip() if header else "?"
 
-        ip_m = re.search(r"IPv4 Address[^:]*:\s*([\d.]+)", block)
+        ip_m = re.search(r"(?:Autoconfiguration )?IPv4 Address[^:]*:\s*([\d.]+)", block)
         if not ip_m:
             continue
         ip = ip_m.group(1).rstrip("(Preferred)")
