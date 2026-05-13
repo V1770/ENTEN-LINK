@@ -543,18 +543,18 @@ class DeckWidget(QGroupBox):
         now_t = time.monotonic()
         jog_delta: int | None = None
         if self._last_precise_pos_ms is not None and self._last_precise_t is not None:
-            dt_ms = max(1.0, (now_t - self._last_precise_t) * 1000.0)
             raw_delta = int(position_ms - self._last_precise_pos_ms)
+            play_state = self._last_state.play_state_raw if self._last_state is not None else None
+            is_jog_search = (play_state == PlayStateRaw.JOG_SEARCH)
+            is_not_playing = (not self._last_state.is_playing) if self._last_state is not None else True
 
-            playing = self._last_state.is_playing if self._last_state is not None else False
-            reverse = (self._last_state.play_state_raw == PlayStateRaw.REVERSE) if self._last_state is not None else False
-            pitch_mult = max(0.0, 1.0 + float(pitch))
-            expected = int((-dt_ms if reverse else dt_ms) * pitch_mult) if playing else 0
-            residual = raw_delta - expected
-
-            # Show meaningful platter/search movement only.
-            if (not playing and abs(raw_delta) >= 2) or abs(residual) >= 18:
-                jog_delta = residual if playing else raw_delta
+            # Only show the JOG label when the CDJ explicitly signals jog-search
+            # or the player is paused and the position is moving (seek/scrub).
+            # The previous residual-based approach was unreliable: UDP packet
+            # batching on Windows causes dt_ms jitter that spikes residual above
+            # the threshold even during normal playback with no jog action.
+            if (is_jog_search or is_not_playing) and abs(raw_delta) >= 2:
+                jog_delta = raw_delta
 
         self._last_precise_pos_ms = int(position_ms)
         self._last_precise_t = now_t
