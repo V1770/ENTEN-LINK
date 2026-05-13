@@ -105,14 +105,15 @@ def _get_network_info(target: str = "8.8.8.8") -> tuple[str, bytes, str]:
     selected_ip: str | None = None
     selected_mac: bytes = b"\x00" * 6
     selected_mask = "0xffffff00"
+    _routed_ip: str | None = None
 
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect((target, 80))
-        routed = s.getsockname()[0]
+        _routed_ip = s.getsockname()[0]
         s.close()
         for _, ip, mask, mac, _ in interfaces:
-            if ip == routed:
+            if ip == _routed_ip:
                 selected_ip, selected_mac, selected_mask = ip, mac, mask
                 break
     except OSError:
@@ -126,6 +127,20 @@ def _get_network_info(target: str = "8.8.8.8") -> tuple[str, bytes, str]:
 
     if selected_ip is None and interfaces:
         _, selected_ip, selected_mask, selected_mac, _ = interfaces[0]
+
+    # ── 3. Platform-native fallback (Windows: ifconfig unavailable) ────────────
+    # ifconfig does not exist on Windows, so _parse_ifconfig_interfaces() returns
+    # an empty list and the routing-derived IP is never matched above.  Use it
+    # directly here so the VirtualCDJ announces from the real LAN IP instead of
+    # loopback — without this, CDJs on the network never see our keep-alives.
+    if selected_ip is None and _routed_ip and not _routed_ip.startswith("127."):
+        selected_ip = _routed_ip
+        try:
+            import uuid as _uuid
+            mac_int = _uuid.getnode()
+            selected_mac = mac_int.to_bytes(6, "big")
+        except Exception:
+            pass
 
     if selected_ip is None:
         selected_ip = "127.0.0.1"

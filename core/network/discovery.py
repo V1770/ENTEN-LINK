@@ -14,9 +14,9 @@ log = logging.getLogger(__name__)
 def _local_ipv4_addresses() -> set[str]:
     """Best-effort set of local IPv4 addresses used for self-packet filtering.
 
-    Uses both hostname resolution and ifconfig so that link-local addresses
-    (169.254.x.x) assigned to the wired interface are included — hostname
-    resolution alone typically misses them on macOS.
+    Uses hostname resolution, ifconfig (macOS/Linux), and a routing-trick
+    UDP connect so that the set is populated correctly on all platforms,
+    including Windows where ifconfig is not available.
     """
     import re, subprocess  # noqa: PLC0415
     result = {"127.0.0.1"}
@@ -32,6 +32,16 @@ def _local_ipv4_addresses() -> set[str]:
         for m in re.finditer(r'\binet\s+(\d+\.\d+\.\d+\.\d+)', out):
             result.add(m.group(1))
     except Exception:
+        pass
+    # Routing-trick fallback: always gets the correct outgoing LAN IP even on
+    # Windows (where ifconfig is absent) or when hostname resolution returns
+    # only loopback / IPv6.  This guarantees the self-announce filter works.
+    try:
+        _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _s.connect(("8.8.8.8", 80))
+        result.add(_s.getsockname()[0])
+        _s.close()
+    except OSError:
         pass
     return result
 
