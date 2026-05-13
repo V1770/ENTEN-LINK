@@ -122,7 +122,7 @@ class MainWindow(QMainWindow):
 
     def _build_view_menu(self) -> None:
         from PyQt6.QtGui import QKeySequence
-        from PyQt6.QtWidgets import QShortcut
+        from PyQt6.QtGui import QShortcut
         sc_lib = QShortcut(QKeySequence("Ctrl+L"), self)
         sc_lib.activated.connect(self._open_library_dialog)
         sc_txt = QShortcut(QKeySequence("Ctrl+T"), self)
