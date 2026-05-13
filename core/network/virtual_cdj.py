@@ -121,16 +121,23 @@ def _parse_ipconfig_interfaces() -> list[tuple[str, str, str, bytes, bool]]:
         header = re.match(r"^(.+adapter|.+interface)\s+(.+):\s*$", block, re.IGNORECASE)
         iface = header.group(2).strip() if header else "?"
 
-        ip_m = re.search(r"(?:Autoconfiguration )?IPv4 Address[^:]*:\s*([\d.]+)", block)
+        # Match English "IPv4 Address" AND German "IPv4-Adresse" / "Autoconfiguration-IPv4-Adresse"
+        ip_m = re.search(
+            r"(?:Autoconfiguration[- ])?IPv4[- ]Addr(?:ess|esse)[^:]*:\s*([\d.]+)",
+            block, re.IGNORECASE,
+        )
         if not ip_m:
             continue
-        # Strip "(Preferred)" suffix — use removesuffix, not rstrip (rstrip strips chars)
+        # Strip "(Preferred)" (EN) or "(Bevorzugt)" (DE) suffix
         ip = ip_m.group(1)
-        ip = ip.removesuffix("(Preferred)").strip()
+        for _suf in ("(Preferred)", "(Bevorzugt)"):
+            ip = ip.removesuffix(_suf)
+        ip = ip.strip()
         if ip.startswith("127."):
             continue
 
-        mask_m = re.search(r"Subnet Mask[^:]*:\s*([\d.]+)", block)
+        # "Subnet Mask" (EN) / "Subnetzmaske" (DE)
+        mask_m = re.search(r"(?:Subnet Mask|Subnetzmaske)[^:]*:\s*([\d.]+)", block, re.IGNORECASE)
         if mask_m:
             try:
                 mask_int = int(ipaddress.IPv4Address(mask_m.group(1)))
@@ -140,13 +147,18 @@ def _parse_ipconfig_interfaces() -> list[tuple[str, str, str, bytes, bool]]:
         else:
             mask_hex = "0xffff0000" if ip.startswith("169.254.") else "0xffffff00"
 
-        mac_m = re.search(r"Physical Address[^:]*:\s*([0-9A-Fa-f]{2}(?:[-:][0-9A-Fa-f]{2}){5})", block)
+        # "Physical Address" (EN) / "Physische Adresse" (DE)
+        mac_m = re.search(
+            r"(?:Physical Address|Physische Adresse)[^:]*:\s*([0-9A-Fa-f]{2}(?:[-:][0-9A-Fa-f]{2}){5})",
+            block, re.IGNORECASE,
+        )
         if mac_m:
             mac = bytes(int(x, 16) for x in re.split(r"[-:]", mac_m.group(1)))
         else:
             mac = b"\x00" * 6
 
-        active = bool(re.search(r"Default Gateway[^:]*:\s*\d", block))
+        # "Default Gateway" (EN) / "Standardgateway" (DE)
+        active = bool(re.search(r"(?:Default Gateway|Standardgateway)[^:]*:\s*\d", block, re.IGNORECASE))
         interfaces.append((iface, ip, mask_hex, mac, active))
     return interfaces
 
@@ -173,6 +185,28 @@ def _powershell_link_local_ip() -> str | None:
     except Exception as exc:
         log.warning("PowerShell Get-NetIPAddress failed: %s", exc)
     return None
+
+
+def _powershell_link_local_if_index(ip: str) -> int:
+    """Return the Windows interface index for the given IP address, or 0 on failure.
+
+    Used to set IP_UNICAST_IF so outgoing broadcast packets are forced through
+    the correct NIC even when bound to INADDR_ANY.
+    """
+    try:
+        cmd = (
+            f"Get-NetIPAddress -AddressFamily IPv4 -IPAddress '{ip}' "
+            "| Select-Object -First 1 -ExpandProperty InterfaceIndex"
+        )
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
+            text=True, timeout=6, stderr=subprocess.DEVNULL,
+            startupinfo=_win_startupinfo(),
+        )
+        return int(out.strip())
+    except Exception as exc:
+        log.debug("PowerShell InterfaceIndex lookup failed for %s: %s", ip, exc)
+        return 0
 
 
 def _get_network_info(target: str = "8.8.8.8") -> tuple[str, bytes, str]:
@@ -411,7 +445,14 @@ class VirtualCDJAnnouncer:
         nb = _name_bytes(_DEVICE_NAME)
         num = self._player_number
 
-        def make_socket(local_ip: str) -> socket.socket:
+        # IP_UNICAST_IF (Windows Vista+): forces outgoing packets through a
+        # specific NIC even when the socket is bound to INADDR_ANY.  This is
+        # critical when Windows routing would otherwise pick the Wi-Fi adapter
+        # (192.168.x.x) instead of the Ethernet NIC (169.254.x.x) connected
+        # to the CDJs.  Value = 31 (not in Python's socket module constants).
+        _IP_UNICAST_IF = 31
+
+        def make_socket(local_ip: str, if_index: int = 0) -> socket.socket:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -423,28 +464,32 @@ class VirtualCDJAnnouncer:
                 sock.bind((local_ip, 0))
                 log.debug("VirtualCDJ socket bound to %s", local_ip)
             except OSError as exc:
-                # WinError 10049 (WSAEADDRNOTAVAIL): Windows rejects binding a
-                # broadcast UDP socket to a link-local 169.254.x.x address that
-                # isn't fully up yet (APIPA interface still initialising).
-                # Fall back to INADDR_ANY — use IP_MULTICAST_IF to hint the OS
-                # to send outgoing broadcasts via the correct interface.
+                # WinError 10049 (WSAEADDRNOTAVAIL): Windows won't let us bind
+                # to the link-local IP (DAD still running, or NIC in unusual
+                # state).  Fall back to INADDR_ANY and use IP_UNICAST_IF to
+                # force outgoing broadcasts through the correct NIC so the
+                # source IP in the packet matches what we claim to be.
                 log.warning(
                     "VirtualCDJ could not bind to %s: %s — falling back to INADDR_ANY",
                     local_ip, exc,
                 )
                 try:
                     sock.bind(("", 0))
-                    # Force outgoing packets via the link-local interface so CDJs
-                    # see keepalives arriving from 169.254.x.x, not 192.168.x.x.
-                    if local_ip.startswith("169.254."):
-                        try:
-                            sock.setsockopt(
-                                socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
-                                socket.inet_aton(local_ip),
-                            )
-                            log.info("VirtualCDJ: set outgoing interface to %s via IP_MULTICAST_IF", local_ip)
-                        except OSError as exc3:
-                            log.debug("VirtualCDJ: IP_MULTICAST_IF not supported: %s", exc3)
+                    if local_ip.startswith("169.254.") and if_index:
+                        import sys as _sys
+                        if _sys.platform == "win32":
+                            try:
+                                sock.setsockopt(
+                                    socket.IPPROTO_IP, _IP_UNICAST_IF,
+                                    struct.pack("=I", if_index),
+                                )
+                                log.info(
+                                    "VirtualCDJ: IP_UNICAST_IF set to if_index=%d → "
+                                    "outgoing broadcasts will use NIC %s",
+                                    if_index, local_ip,
+                                )
+                            except OSError as exc3:
+                                log.warning("VirtualCDJ: IP_UNICAST_IF failed: %s", exc3)
                 except OSError as exc2:
                     log.warning("VirtualCDJ INADDR_ANY bind also failed: %s", exc2)
             sock.setblocking(False)
@@ -472,10 +517,21 @@ class VirtualCDJAnnouncer:
                         local_ip,
                     )
 
-                # If the chosen IP is link-local (169.254.x.x), Windows DAD may
-                # still be running and the address won't be bindable yet.
-                # Retry the bind probe for up to ~9 seconds before giving up.
+                # If the chosen IP is link-local (169.254.x.x), pre-fetch the
+                # Windows interface index (needed for IP_UNICAST_IF fallback)
+                # and retry the bind probe for up to ~9 s (DAD usually finishes
+                # within 1–2 s, but some adapters take longer).
+                _ll_if_index = 0
                 if local_ip.startswith("169.254."):
+                    import sys as _sys
+                    if _sys.platform == "win32":
+                        _ll_if_index = await asyncio.get_running_loop().run_in_executor(
+                            None, _powershell_link_local_if_index, local_ip
+                        )
+                        log.info(
+                            "VirtualCDJ: interface index for %s = %d",
+                            local_ip, _ll_if_index,
+                        )
                     for _attempt in range(4):
                         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                         try:
@@ -493,7 +549,7 @@ class VirtualCDJAnnouncer:
                                 await asyncio.sleep(3.0)
                             else:
                                 log.warning(
-                                    "VirtualCDJ: %s still not bindable after 4 attempts — will fall back to INADDR_ANY",
+                                    "VirtualCDJ: %s still not bindable after 4 attempts — will use INADDR_ANY + IP_UNICAST_IF",
                                     local_ip,
                                 )
 
@@ -508,7 +564,7 @@ class VirtualCDJAnnouncer:
 
                 if sock is not None:
                     sock.close()
-                sock = make_socket(local_ip)
+                sock = make_socket(local_ip, if_index=_ll_if_index)
 
                 def send(pkt: bytes) -> bool:
                     try:
