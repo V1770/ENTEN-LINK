@@ -55,10 +55,21 @@ a = Analysis(
     noarchive=False,
 )
 
-# Strip large Qt DLLs that cause decompression failures in one-file mode
-# and are not needed on machines with GPU drivers installed.
-_EXCLUDE_DLLS = {"opengl32sw.dll", "d3dcompiler_47.dll", "libpq.dll"}
-a.binaries = [b for b in a.binaries if b[0].lower().split("\\")[-1] not in _EXCLUDE_DLLS]
+# Strip binaries that cause decompression failures in one-file mode or are
+# simply not needed by this application.
+_EXCLUDE_BINS = {
+    "opengl32sw.dll",      # software-render fallback — real GPU drivers cover this
+    "d3dcompiler_47.dll",  # shader compiler — not used
+    "libpq.dll",           # PostgreSQL client — not used
+    # QAxContainer / QAxServer: COM/ActiveX Qt extension — not used, and
+    # QAxContainer.pyd reliably causes extraction errors in one-file mode.
+    "qaxcontainer.pyd",
+    "qaxserver.pyd",
+}
+a.binaries = [
+    b for b in a.binaries
+    if b[0].lower().replace("/", "\\").split("\\")[-1] not in _EXCLUDE_BINS
+]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
