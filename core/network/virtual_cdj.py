@@ -578,26 +578,25 @@ class VirtualCDJAnnouncer:
                 _candidate_ip = _candidate_mac = _candidate_bc = None
 
                 while not stop_event.is_set():
-                    if _candidate_ip is None:
-                        # Phase 1: discover a link-local address
+                    # Re-run full interface discovery every 10 s (every 5 ticks)
+                    # so a newly-assigned static IP is picked up without restarting.
+                    if _candidate_ip is None or _wait_count % 5 == 0:
                         _cip, _cmac, _cbc = await asyncio.get_running_loop().run_in_executor(
                             None, _get_network_info
                         )
                         if _cip.startswith("169.254."):
+                            if _cip != _candidate_ip:
+                                log.info(
+                                    "VirtualCDJ: %s found — probing bind() until Preferred...",
+                                    _cip,
+                                )
                             _candidate_ip, _candidate_mac, _candidate_bc = _cip, _cmac, _cbc
-                            log.info(
-                                "VirtualCDJ: %s found — probing bind() until Preferred...",
-                                _candidate_ip,
-                            )
                         else:
                             if _wait_count == 0:
                                 log.info(
                                     "VirtualCDJ: no link-local IP yet (got %s) — "
                                     "waiting for APIPA assignment...", _cip,
                                 )
-                    else:
-                        # Phase 2: just try bind() — no subprocess needed
-                        _cip = _candidate_ip
 
                     if _candidate_ip is not None:
                         _probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
