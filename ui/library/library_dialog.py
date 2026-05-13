@@ -1,3 +1,4 @@
+"""Data browser."""
 from __future__ import annotations
 
 import logging
@@ -137,14 +138,13 @@ def _copy_tracks(
 
 
 class LibraryDialog(QDialog):
-    """Pioneer-style two-panel library browser: category tree + track list."""
 
     def __init__(self, local_db, parent=None) -> None:
         super().__init__(parent)
         self._local_db = local_db
         self._all_tracks: list = []
         self._current_tracks: list = []   # tracks currently shown in table
-        self.setWindowTitle("Browse Library")
+        self.setWindowTitle("Data")
         self.resize(1100, 660)
         self._build()
         self.refresh_tracks()
@@ -154,7 +154,7 @@ class LibraryDialog(QDialog):
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(6)
 
-        # ── Search bar ────────────────────────────────────────────────
+        # ── Search bar ──────────────────────────────────────────────
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(8)

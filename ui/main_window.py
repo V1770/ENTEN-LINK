@@ -1,11 +1,4 @@
-"""
-Main application window.
-
-Customizable operator grid:
-    - Auto-fit or fixed column count
-    - Per-player visibility toggles
-    - Optional offline compaction to avoid wasting panel space
-"""
+"""Main application window."""
 from __future__ import annotations
 import logging
 
@@ -96,7 +89,6 @@ class MainWindow(QMainWindow):
 
         self._track_text_button = QPushButton("", self)
         self._track_text_button.setFixedSize(14, 14)
-        self._track_text_button.setToolTip("Toggle track text / artwork")
         self._track_text_button.setStyleSheet(
             "QPushButton { background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 3px; }"
             "QPushButton:checked { background: #222228; border-color: #2e2e38; }"
@@ -107,10 +99,10 @@ class MainWindow(QMainWindow):
         self._track_text_button.setChecked(self._show_track_text)
         self._track_text_button.toggled.connect(self._set_show_track_text)
         self._update_track_text_button_label()
+        self._track_text_button.setVisible(False)
 
         self._library_button = QPushButton("", self)
         self._library_button.setFixedSize(14, 14)
-        self._library_button.setToolTip("Open library")
         self._library_button.setStyleSheet(
             "QPushButton { background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 3px; }"
             "QPushButton:hover { background: #282828; }"
@@ -119,17 +111,25 @@ class MainWindow(QMainWindow):
         )
         self._library_button.clicked.connect(self._open_library_dialog)
         self._library_button.setEnabled(bool(self._local_db and getattr(self._local_db, "ready", False)))
+        self._library_button.setVisible(False)
 
         bar = QStatusBar()
         bar.addWidget(self._status_label, stretch=1)
-        bar.addPermanentWidget(self._library_button)
-        bar.addPermanentWidget(self._track_text_button)
         bar.addPermanentWidget(self._player_count_label)
         self.setStatusBar(bar)
 
         self._apply_layout()
 
     def _build_view_menu(self) -> None:
+        from PyQt6.QtGui import QKeySequence
+        from PyQt6.QtWidgets import QShortcut
+        sc_lib = QShortcut(QKeySequence("Ctrl+L"), self)
+        sc_lib.activated.connect(self._open_library_dialog)
+        sc_txt = QShortcut(QKeySequence("Ctrl+T"), self)
+        sc_txt.activated.connect(
+            lambda: self._track_text_button.toggle() if self._track_text_button else None
+        )
+
         view_menu = self.menuBar().addMenu("&View")
         settings_menu = self.menuBar().addMenu("&Settings")
 
