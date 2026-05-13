@@ -423,11 +423,30 @@ class VirtualCDJAnnouncer:
                 sock.bind((local_ip, 0))
                 log.debug("VirtualCDJ socket bound to %s", local_ip)
             except OSError as exc:
+                # WinError 10049 (WSAEADDRNOTAVAIL): Windows rejects binding a
+                # broadcast UDP socket to a link-local 169.254.x.x address that
+                # isn't fully up yet (APIPA interface still initialising).
+                # Fall back to INADDR_ANY — use IP_MULTICAST_IF to hint the OS
+                # to send outgoing broadcasts via the correct interface.
                 log.warning(
-                    "VirtualCDJ could not bind to %s: %s — broadcasts may fail",
-                    local_ip,
-                    exc,
+                    "VirtualCDJ could not bind to %s: %s — falling back to INADDR_ANY",
+                    local_ip, exc,
                 )
+                try:
+                    sock.bind(("", 0))
+                    # Force outgoing packets via the link-local interface so CDJs
+                    # see keepalives arriving from 169.254.x.x, not 192.168.x.x.
+                    if local_ip.startswith("169.254."):
+                        try:
+                            sock.setsockopt(
+                                socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+                                socket.inet_aton(local_ip),
+                            )
+                            log.info("VirtualCDJ: set outgoing interface to %s via IP_MULTICAST_IF", local_ip)
+                        except OSError as exc3:
+                            log.debug("VirtualCDJ: IP_MULTICAST_IF not supported: %s", exc3)
+                except OSError as exc2:
+                    log.warning("VirtualCDJ INADDR_ANY bind also failed: %s", exc2)
             sock.setblocking(False)
             return sock
 
@@ -452,6 +471,31 @@ class VirtualCDJAnnouncer:
                         "VirtualCDJ: loopback IP detected (%s) — announcements will not reach rekordbox on LAN",
                         local_ip,
                     )
+
+                # If the chosen IP is link-local (169.254.x.x), Windows DAD may
+                # still be running and the address won't be bindable yet.
+                # Retry the bind probe for up to ~9 seconds before giving up.
+                if local_ip.startswith("169.254."):
+                    for _attempt in range(4):
+                        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        try:
+                            probe.bind((local_ip, 0))
+                            probe.close()
+                            log.debug("VirtualCDJ: bind probe succeeded for %s (attempt %d/4)", local_ip, _attempt + 1)
+                            break
+                        except OSError as _exc:
+                            probe.close()
+                            if _attempt < 3:
+                                log.info(
+                                    "VirtualCDJ: %s not yet bindable (attempt %d/4, DAD in progress) — retrying in 3s",
+                                    local_ip, _attempt + 1,
+                                )
+                                await asyncio.sleep(3.0)
+                            else:
+                                log.warning(
+                                    "VirtualCDJ: %s still not bindable after 4 attempts — will fall back to INADDR_ANY",
+                                    local_ip,
+                                )
 
                 ip_bytes = ipaddress.IPv4Address(local_ip).packed
                 log.info(
