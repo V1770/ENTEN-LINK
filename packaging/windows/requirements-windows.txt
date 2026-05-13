@@ -1,8 +1,0 @@
-# Runtime dependencies actually imported by the app on Windows.
-# (aubio / sounddevice / python-rtmidi are listed in the dev requirements
-#  but not currently used at runtime — keeping them out avoids needing a
-#  C toolchain on the build machine.)
-PyQt6>=6.4.0
-PyQt6-Qt6>=6.4.0
-numpy>=1.24.0
-pyqtgraph>=0.13.0
