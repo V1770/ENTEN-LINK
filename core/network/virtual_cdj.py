@@ -55,7 +55,13 @@ _DEVICE_NAME = "Pioneer DJ Link"
 # ── Network interface detection ───────────────────────────────────────────────
 
 def _parse_ifconfig_interfaces() -> list[tuple[str, str, str, bytes, bool]]:
-    """Parse ifconfig; return (iface, ip, netmask_hex, mac_bytes, is_active)."""
+    """Parse ifconfig (macOS/Linux) or ipconfig /all (Windows).
+
+    Returns (iface, ip, netmask_hex, mac_bytes, is_active).
+    """
+    import sys as _sys
+    if _sys.platform == "win32":
+        return _parse_ipconfig_interfaces()
     try:
         out = subprocess.check_output(["ifconfig"], text=True, timeout=2)
     except Exception as exc:
@@ -79,6 +85,55 @@ def _parse_ifconfig_interfaces() -> list[tuple[str, str, str, bytes, bool]]:
         mac = (bytes(int(x, 16) for x in mac_m.group(1).split(":"))
                if mac_m else b"\x00" * 6)
         interfaces.append((header.group(1), ip, mask_hex, mac, "status: active" in block))
+    return interfaces
+
+
+def _parse_ipconfig_interfaces() -> list[tuple[str, str, str, bytes, bool]]:
+    """Windows equivalent of _parse_ifconfig_interfaces using 'ipconfig /all'."""
+    try:
+        out = subprocess.check_output(
+            ["ipconfig", "/all"], text=True, timeout=4,
+            creationflags=0x08000000  # CREATE_NO_WINDOW — suppress console popup
+        )
+    except Exception as exc:
+        log.debug("Could not run ipconfig: %s", exc)
+        return []
+
+    interfaces: list[tuple[str, str, str, bytes, bool]] = []
+    # Split on adapter header lines (e.g. "Ethernet adapter Local Area Connection:")
+    for block in re.split(r"\n(?=\S)", out):
+        # Extract adapter name
+        header = re.match(r"^(.+adapter|.+interface)\s+(.+):\s*$", block, re.IGNORECASE)
+        iface = header.group(2).strip() if header else "?"
+
+        ip_m = re.search(r"IPv4 Address[^:]*:\s*([\d.]+)", block)
+        if not ip_m:
+            continue
+        ip = ip_m.group(1).rstrip("(Preferred)")
+        if ip.startswith("127."):
+            continue
+
+        # Subnet mask (dotted decimal on Windows) → convert to hex
+        mask_m = re.search(r"Subnet Mask[^:]*:\s*([\d.]+)", block)
+        if mask_m:
+            try:
+                mask_int = int(ipaddress.IPv4Address(mask_m.group(1)))
+                mask_hex = f"0x{mask_int:08x}"
+            except ValueError:
+                mask_hex = "0xffffff00"
+        else:
+            mask_hex = "0xffffff00"
+
+        # MAC address (Windows format: XX-XX-XX-XX-XX-XX)
+        mac_m = re.search(r"Physical Address[^:]*:\s*([0-9A-Fa-f]{2}(?:[-:][0-9A-Fa-f]{2}){5})", block)
+        if mac_m:
+            mac = bytes(int(x, 16) for x in re.split(r"[-:]", mac_m.group(1)))
+        else:
+            mac = b"\x00" * 6
+
+        # Consider active if has a valid gateway or is media connected
+        active = bool(re.search(r"Default Gateway[^:]*:\s*\d", block))
+        interfaces.append((iface, ip, mask_hex, mac, active))
     return interfaces
 
 

@@ -109,8 +109,8 @@ class DiscoveryReceiver:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except AttributeError:
-            pass  # Windows lacks SO_REUSEPORT
+        except (AttributeError, OSError):
+            pass  # SO_REUSEPORT absent or unsupported on this platform/Python version
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.bind(("", PORT_ANNOUNCE))
 

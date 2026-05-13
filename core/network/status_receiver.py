@@ -119,8 +119,8 @@ class StatusReceiver:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except AttributeError:
-            pass
+        except (AttributeError, OSError):
+            pass  # SO_REUSEPORT absent or unsupported on this platform/Python version
         sock.bind(("", PORT_STATUS))
 
         transport, _ = await loop.create_datagram_endpoint(
