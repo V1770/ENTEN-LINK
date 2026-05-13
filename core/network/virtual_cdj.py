@@ -519,9 +519,11 @@ class VirtualCDJAnnouncer:
 
                 # If the chosen IP is link-local (169.254.x.x), pre-fetch the
                 # Windows interface index (needed for IP_UNICAST_IF fallback)
-                # and retry the bind probe for up to ~9 s (DAD usually finishes
-                # within 1–2 s, but some adapters take longer).
+                # and retry the bind probe for up to ~60 s.  Windows APIPA NIC
+                # sometimes takes 30-60 s to add its interface route even after
+                # DAD completes and PowerShell can see the address.
                 _ll_if_index = 0
+                _bind_ok = False
                 if local_ip.startswith("169.254."):
                     import sys as _sys
                     if _sys.platform == "win32":
@@ -532,26 +534,46 @@ class VirtualCDJAnnouncer:
                             "VirtualCDJ: interface index for %s = %d",
                             local_ip, _ll_if_index,
                         )
-                    for _attempt in range(4):
+                    for _attempt in range(12):
                         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                         try:
                             probe.bind((local_ip, 0))
                             probe.close()
-                            log.debug("VirtualCDJ: bind probe succeeded for %s (attempt %d/4)", local_ip, _attempt + 1)
+                            _bind_ok = True
+                            if _attempt > 0:
+                                log.info(
+                                    "VirtualCDJ: %s now bindable (attempt %d/12)",
+                                    local_ip, _attempt + 1,
+                                )
                             break
                         except OSError as _exc:
                             probe.close()
-                            if _attempt < 3:
+                            if _attempt < 11:
                                 log.info(
-                                    "VirtualCDJ: %s not yet bindable (attempt %d/4, DAD in progress) — retrying in 3s",
+                                    "VirtualCDJ: %s not yet bindable (attempt %d/12, NIC still initialising) — retrying in 5s",
                                     local_ip, _attempt + 1,
                                 )
-                                await asyncio.sleep(3.0)
+                                await asyncio.sleep(5.0)
                             else:
                                 log.warning(
-                                    "VirtualCDJ: %s still not bindable after 4 attempts — will use INADDR_ANY + IP_UNICAST_IF",
+                                    "VirtualCDJ: %s still not bindable after 12 attempts (60s) — "
+                                    "proceeding with INADDR_ANY; CDJ_STATUS may not be received",
                                     local_ip,
                                 )
+
+                    # After waiting, re-run network detection.  The Ethernet NIC
+                    # interface route (169.254.0.0/16) is often added to the
+                    # routing table only after APIPA completes, which is exactly
+                    # when the bind probe starts succeeding.  A fresh routing
+                    # trick will pick the correct source IP.
+                    if _bind_ok:
+                        local_ip, local_mac, broadcast = await asyncio.get_running_loop().run_in_executor(
+                            None, _get_network_info
+                        )
+                        log.info(
+                            "VirtualCDJ: post-DAD network re-check → IP=%s broadcast=%s",
+                            local_ip, broadcast,
+                        )
 
                 ip_bytes = ipaddress.IPv4Address(local_ip).packed
                 log.info(
@@ -637,11 +659,32 @@ class VirtualCDJAnnouncer:
                     num,
                     _KEEPALIVE_INTERVAL,
                 )
+                _rebind_check_counter = 0
                 while not stop_event.is_set():
                     if not send(keepalive):
                         log.info("VirtualCDJ: network path changed, re-claiming player #%d", num)
                         break
                     await asyncio.sleep(_KEEPALIVE_INTERVAL)
+
+                    # If we're on INADDR_ANY fallback, periodically probe whether
+                    # the link-local address is now bindable.  When it is, break
+                    # out and re-claim with the correctly-bound socket so CDJs
+                    # see the right source IP in keepalive packets.
+                    if not _bind_ok and local_ip.startswith("169.254."):
+                        _rebind_check_counter += 1
+                        if _rebind_check_counter % 4 == 0:  # every ~6 s
+                            _rp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                            try:
+                                _rp.bind((local_ip, 0))
+                                _rp.close()
+                                log.info(
+                                    "VirtualCDJ: %s is now bindable — restarting claim with correct socket",
+                                    local_ip,
+                                )
+                                _bind_ok = True
+                                break  # restart outer loop → re-claim via correct interface
+                            except OSError:
+                                _rp.close()
 
                 if stop_event.is_set():
                     return
