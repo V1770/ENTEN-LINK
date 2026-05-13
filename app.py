@@ -18,13 +18,17 @@ from core.network.network_worker import NetworkWorker
 from ui.main_window import MainWindow
 from ui.theme import apply_dark_theme
 
+import tempfile, pathlib
+
+_log_path = pathlib.Path(tempfile.gettempdir()) / "djlink.log"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
     datefmt="%H:%M:%S",
     handlers=[
         logging.StreamHandler(),                      # terminal
-        logging.FileHandler("/tmp/djlink.log", mode="w"),  # always-flushed file
+        logging.FileHandler(_log_path, mode="w"),     # always-flushed file
     ],
 )
 
