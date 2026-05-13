@@ -567,24 +567,44 @@ class VirtualCDJAnnouncer:
                 # a broadcast address (= Preferred state).  It never falls back to
                 # INADDR_ANY; it just waits.
                 #
-                # We do the same: poll every 1 s until _get_network_info() returns
-                # a 169.254.x.x IP AND direct bind() succeeds.  INADDR_ANY is
-                # useless here because IP_UNICAST_IF also fails with WSAEADDRNOTAVAIL
-                # (10049) on Tentative addresses — confirmed in Windows log.
+                # Phase 1: call _get_network_info() every 2 s until we have a
+                # 169.254.x.x IP candidate.
+                # Phase 2: once we have a candidate, just probe bind() every 2 s —
+                # no need to re-run ipconfig/PowerShell on every tick.
                 local_ip = local_mac = broadcast = None
                 _ll_if_index = 0
                 _bind_ok = False
                 _wait_count = 0
+                _candidate_ip = _candidate_mac = _candidate_bc = None
+
                 while not stop_event.is_set():
-                    _cip, _cmac, _cbc = await asyncio.get_running_loop().run_in_executor(
-                        None, _get_network_info
-                    )
-                    if _cip.startswith("169.254."):
+                    if _candidate_ip is None:
+                        # Phase 1: discover a link-local address
+                        _cip, _cmac, _cbc = await asyncio.get_running_loop().run_in_executor(
+                            None, _get_network_info
+                        )
+                        if _cip.startswith("169.254."):
+                            _candidate_ip, _candidate_mac, _candidate_bc = _cip, _cmac, _cbc
+                            log.info(
+                                "VirtualCDJ: %s found — probing bind() until Preferred...",
+                                _candidate_ip,
+                            )
+                        else:
+                            if _wait_count == 0:
+                                log.info(
+                                    "VirtualCDJ: no link-local IP yet (got %s) — "
+                                    "waiting for APIPA assignment...", _cip,
+                                )
+                    else:
+                        # Phase 2: just try bind() — no subprocess needed
+                        _cip = _candidate_ip
+
+                    if _candidate_ip is not None:
                         _probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                         try:
-                            _probe.bind((_cip, 0))
+                            _probe.bind((_candidate_ip, 0))
                             _probe.close()
-                            local_ip, local_mac, broadcast = _cip, _cmac, _cbc
+                            local_ip, local_mac, broadcast = _candidate_ip, _candidate_mac, _candidate_bc
                             _bind_ok = True
                             import sys as _sys
                             if _sys.platform == "win32":
@@ -599,25 +619,13 @@ class VirtualCDJAnnouncer:
                             break
                         except OSError:
                             _probe.close()
-                            if _wait_count == 0:
-                                log.info(
-                                    "VirtualCDJ: %s found but not yet bindable "
-                                    "(Windows DAD Tentative) — waiting for Preferred...",
-                                    _cip,
-                                )
-                    else:
-                        if _wait_count == 0:
-                            log.info(
-                                "VirtualCDJ: no link-local IP yet (got %s) — "
-                                "waiting for APIPA assignment...", _cip,
-                            )
                     _wait_count += 1
-                    if _wait_count % 15 == 0:  # log every 15 s
+                    if _wait_count % 15 == 0:  # log every 30 s
                         log.info(
                             "VirtualCDJ: still waiting for bindable 169.254.x.x "
-                            "(last seen: %s, %ds elapsed)", _cip, _wait_count,
+                            "(last seen: %s, %ds elapsed)", _candidate_ip or "none", _wait_count * 2,
                         )
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(2.0)
 
                 if stop_event.is_set():
                     return
