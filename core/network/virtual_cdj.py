@@ -161,6 +161,36 @@ def _get_network_info(target: str = "8.8.8.8") -> tuple[str, bytes, str]:
         return ip.startswith("100.") or ip.startswith("127.")
 
     interfaces = _parse_ifconfig_interfaces()
+    log.info(
+        "VirtualCDJ: ipconfig parsed %d interface(s): %s",
+        len(interfaces),
+        [ip for _, ip, _, _, _ in interfaces],
+    )
+
+    def _mac_for_ip(look_ip: str) -> tuple[bytes, str, str]:
+        """Return (mac, mask_hex, broadcast) for a known IP, or uuid fallback."""
+        for _, iip, imask, imac, _ in interfaces:
+            if iip == look_ip:
+                return imac, imask, _subnet_broadcast(look_ip, imask)
+        import uuid as _uuid
+        fallback_mac = _uuid.getnode().to_bytes(6, "big")
+        return fallback_mac, "0xffff0000", "169.254.255.255"
+
+    # ── 0. Routing-trick to link-local space — most reliable on Windows ──────
+    # Ask the OS kernel which local IP it would use to reach 169.254.x.x.
+    # Works even when ipconfig parsing fails and is immune to Tailscale, because
+    # Tailscale does NOT claim the 169.254.0.0/16 route.
+    try:
+        _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _s.connect(("169.254.0.1", 50000))
+        _ll_ip = _s.getsockname()[0]
+        _s.close()
+        if _ll_ip.startswith("169.254."):
+            _mac, _mask, _bc = _mac_for_ip(_ll_ip)
+            log.debug("VirtualCDJ: link-local routing trick → %s broadcast=%s", _ll_ip, _bc)
+            return _ll_ip, _mac, _bc
+    except OSError:
+        pass
 
     # ── 1. Prefer link-local (169.254.x.x) — Pioneer direct-connect subnet ──
     # On Windows, link-local adapters have no default gateway so active=False.
@@ -207,7 +237,8 @@ def _get_network_info(target: str = "8.8.8.8") -> tuple[str, bytes, str]:
                 break
 
     # ── 5. Windows fallback: ipconfig gave us nothing useful, use routing IP ──
-    if selected_ip is None and _routed_ip and not _routed_ip.startswith("127."):
+    # Only use _routed_ip if it's not a VPN address (avoids Tailscale fallback).
+    if selected_ip is None and _routed_ip and not _is_vpn(_routed_ip):
         selected_ip = _routed_ip
         try:
             import uuid as _uuid
