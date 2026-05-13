@@ -746,10 +746,10 @@ class VirtualCDJAnnouncer:
                     _rebind_check_counter += 1
 
                     # ── Case A: on INADDR_ANY for a link-local IP (Windows Tentative)
-                    # Probe every ~6 s; once bindable, restart the claim with the
+                    # Probe every ~3 s; once bindable, restart the claim with the
                     # correctly-bound socket so CDJs see the right source IP.
                     if not _bind_ok and local_ip.startswith("169.254."):
-                        if _rebind_check_counter % 4 == 0:  # every ~6 s
+                        if _rebind_check_counter % 2 == 0:  # every ~3 s
                             _rp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                             try:
                                 _rp.bind((local_ip, 0))
