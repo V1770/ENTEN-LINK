@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -80,16 +83,23 @@ def _apply_dataclass_updates(target, values: dict) -> None:
 
 def load_config() -> AppConfig:
     path = _config_path()
+    _log.info("Config path: %s  (exists=%s)", path, path.exists())
     if not path.exists():
+        _log.info("No saved settings — using defaults (virtual_cdj_player default=%s)",
+                  config.network.default_virtual_cdj_player)
         return config
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        _log.warning("Could not read config file: %s", exc)
         return config
 
     if isinstance(data, dict):
         _apply_dataclass_updates(config, data)
+    _log.info("Loaded settings: virtual_cdj_player=%s  default_virtual_cdj_player=%s",
+              config.network.virtual_cdj_player,
+              config.network.default_virtual_cdj_player)
     return config
 
 
@@ -97,4 +107,6 @@ def save_config() -> Path:
     path = _config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(asdict(config), indent=2, sort_keys=True), encoding="utf-8")
+    _log.info("Saved settings to %s (virtual_cdj_player=%s  default_virtual_cdj_player=%s)",
+              path, config.network.virtual_cdj_player, config.network.default_virtual_cdj_player)
     return path

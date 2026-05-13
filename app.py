@@ -93,6 +93,7 @@ def main() -> None:
     # saved value unless overridden on the command line, and allow --no-vcdj
     # to drop back into passive listen mode.
     saved_vp = int(getattr(config.network, "default_virtual_cdj_player", 5)) or 5
+    log.info("Virtual CDJ: saved_vp=%s  no_vcdj=%s  --vp=%s", saved_vp, args.no_vcdj, args.vp)
     if args.no_vcdj:
         config.network.virtual_cdj_player = 0
     elif args.vp is not None:
@@ -100,6 +101,7 @@ def main() -> None:
         config.network.default_virtual_cdj_player = args.vp
     else:
         config.network.virtual_cdj_player = saved_vp
+    log.info("Virtual CDJ: final player number = %s", config.network.virtual_cdj_player or "off")
 
     if config.network.virtual_cdj_player:
         logging.getLogger("core.network.virtual_cdj").setLevel(
