@@ -23,3 +23,8 @@ dist/
 beat-link-main/
 beat-link-trigger-main/
 reference_data/
+
+# Internal dev/analysis files
+tools/
+AGENTS.md
+BEAT_LINK_ANALYSIS.md
