@@ -314,6 +314,12 @@ class VirtualCDJAnnouncer:
         self._player_number = player_number
 
     async def listen(self, stop_event: asyncio.Event) -> None:
+        try:
+            await self._listen_inner(stop_event)
+        except Exception as exc:
+            log.error("VirtualCDJ announcer crashed: %s", exc, exc_info=True)
+
+    async def _listen_inner(self, stop_event: asyncio.Event) -> None:
         nb = _name_bytes(_DEVICE_NAME)
         num = self._player_number
 
