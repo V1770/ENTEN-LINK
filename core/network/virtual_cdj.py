@@ -534,32 +534,16 @@ class VirtualCDJAnnouncer:
                 sock.bind((local_ip, 0))
                 log.debug("VirtualCDJ socket bound to %s", local_ip)
             except OSError as exc:
-                # WinError 10049 (WSAEADDRNOTAVAIL): Windows won't let us bind
-                # to the link-local IP (DAD still running, or NIC in unusual
-                # state).  Fall back to INADDR_ANY and use IP_UNICAST_IF to
-                # force outgoing broadcasts through the correct NIC so the
-                # source IP in the packet matches what we claim to be.
+                # bind() failed — this should not happen here because
+                # _listen_inner() now waits until the address is bindable
+                # before calling make_socket().  Log and bind to INADDR_ANY
+                # as an absolute last resort so the socket is at least usable.
                 log.warning(
                     "VirtualCDJ could not bind to %s: %s — falling back to INADDR_ANY",
                     local_ip, exc,
                 )
                 try:
                     sock.bind(("", 0))
-                    if local_ip.startswith("169.254.") and if_index:
-                        import sys as _sys
-                        if _sys.platform == "win32":
-                            try:
-                                sock.setsockopt(
-                                    socket.IPPROTO_IP, _IP_UNICAST_IF,
-                                    struct.pack("=I", if_index),
-                                )
-                                log.info(
-                                    "VirtualCDJ: IP_UNICAST_IF set to if_index=%d → "
-                                    "outgoing broadcasts will use NIC %s",
-                                    if_index, local_ip,
-                                )
-                            except OSError as exc3:
-                                log.warning("VirtualCDJ: IP_UNICAST_IF failed: %s", exc3)
                 except OSError as exc2:
                     log.warning("VirtualCDJ INADDR_ANY bind also failed: %s", exc2)
             sock.setblocking(False)
@@ -577,81 +561,66 @@ class VirtualCDJAnnouncer:
         sock: socket.socket | None = None
         try:
             while not stop_event.is_set():
-                local_ip, local_mac, broadcast = await asyncio.get_running_loop().run_in_executor(
-                    None, _get_network_info
-                )
-
-                if local_ip.startswith("127."):
-                    log.warning(
-                        "VirtualCDJ: loopback IP detected (%s) — announcements will not reach rekordbox on LAN",
-                        local_ip,
-                    )
-
-                # If the chosen IP is link-local (169.254.x.x), pre-fetch the
-                # Windows interface index (needed for IP_UNICAST_IF fallback)
-                # and retry the bind probe for up to ~60 s.  Windows APIPA NIC
-                # sometimes takes 30-60 s to add its interface route even after
-                # DAD completes and PowerShell can see the address.
+                # ── Beat-link approach: wait for a bindable link-local address ──
+                # Beat-link (VirtualCdj.java) waits for DeviceFinder to discover
+                # a CDJ, then uses subnet matching to find a local interface with
+                # a broadcast address (= Preferred state).  It never falls back to
+                # INADDR_ANY; it just waits.
+                #
+                # We do the same: poll every 1 s until _get_network_info() returns
+                # a 169.254.x.x IP AND direct bind() succeeds.  INADDR_ANY is
+                # useless here because IP_UNICAST_IF also fails with WSAEADDRNOTAVAIL
+                # (10049) on Tentative addresses — confirmed in Windows log.
+                local_ip = local_mac = broadcast = None
                 _ll_if_index = 0
                 _bind_ok = False
-                if not local_ip.startswith("169.254."):
-                    # Non-link-local: we got a bad IP (e.g. Wi-Fi or loopback).
-                    # Retry _get_network_info() at 1-second intervals for up to 15 s.
-                    # On macOS the APIPA address appears within ~3 s; on Windows
-                    # step 0.6 should have returned a Tentative IP already so this
-                    # loop is only a safety net.
-                    for _attempt in range(15):
-                        await asyncio.sleep(1.0)
-                        _fresh_ip, _fresh_mac, _fresh_bc = await asyncio.get_running_loop().run_in_executor(
-                            None, _get_network_info
-                        )
-                        if _fresh_ip.startswith("169.254."):
-                            local_ip, local_mac, broadcast = _fresh_ip, _fresh_mac, _fresh_bc
-                            log.info(
-                                "VirtualCDJ: link-local IP resolved on attempt %d/15: %s broadcast=%s",
-                                _attempt + 1, local_ip, broadcast,
-                            )
+                _wait_count = 0
+                while not stop_event.is_set():
+                    _cip, _cmac, _cbc = await asyncio.get_running_loop().run_in_executor(
+                        None, _get_network_info
+                    )
+                    if _cip.startswith("169.254."):
+                        _probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        try:
+                            _probe.bind((_cip, 0))
+                            _probe.close()
+                            local_ip, local_mac, broadcast = _cip, _cmac, _cbc
                             _bind_ok = True
+                            import sys as _sys
+                            if _sys.platform == "win32":
+                                _ll_if_index = await asyncio.get_running_loop().run_in_executor(
+                                    None, _powershell_link_local_if_index, local_ip
+                                )
+                            log.info(
+                                "VirtualCDJ: %s is bindable (Preferred) — "
+                                "proceeding with claim  if_index=%d",
+                                local_ip, _ll_if_index,
+                            )
                             break
-                        log.debug(
-                            "VirtualCDJ: still no link-local IP (attempt %d/15, got %s)",
-                            _attempt + 1, _fresh_ip,
-                        )
+                        except OSError:
+                            _probe.close()
+                            if _wait_count == 0:
+                                log.info(
+                                    "VirtualCDJ: %s found but not yet bindable "
+                                    "(Windows DAD Tentative) — waiting for Preferred...",
+                                    _cip,
+                                )
                     else:
-                        log.warning(
-                            "VirtualCDJ: no link-local IP after 15s — proceeding with %s; "
-                            "CDJs may not respond with CDJ_STATUS", local_ip,
-                        )
-                else:
-                    import sys as _sys
-                    if _sys.platform == "win32":
-                        _ll_if_index = await asyncio.get_running_loop().run_in_executor(
-                            None, _powershell_link_local_if_index, local_ip
-                        )
+                        if _wait_count == 0:
+                            log.info(
+                                "VirtualCDJ: no link-local IP yet (got %s) — "
+                                "waiting for APIPA assignment...", _cip,
+                            )
+                    _wait_count += 1
+                    if _wait_count % 15 == 0:  # log every 15 s
                         log.info(
-                            "VirtualCDJ: interface index for %s = %d",
-                            local_ip, _ll_if_index,
+                            "VirtualCDJ: still waiting for bindable 169.254.x.x "
+                            "(last seen: %s, %ds elapsed)", _cip, _wait_count,
                         )
-                    # Probe bind() to confirm address is in Preferred state.
-                    # If it fails the address is Tentative/Duplicate; re-call
-                    # _get_network_info() which will return Preferred IP once ready.
-                    _probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    try:
-                        _probe.bind((local_ip, 0))
-                        _probe.close()
-                        _bind_ok = True
-                        log.info("VirtualCDJ: %s is bindable (Preferred state)", local_ip)
-                    except OSError:
-                        _probe.close()
-                        log.info(
-                            "VirtualCDJ: %s not yet bindable (Tentative?) — "
-                            "proceeding immediately with INADDR_ANY + IP_UNICAST_IF; "
-                            "will upgrade to direct bind once address is Preferred",
-                            local_ip,
-                        )
-                        # _bind_ok stays False → make_socket() uses INADDR_ANY + IP_UNICAST_IF.
-                        # The rebind_check in the keepalive loop probes every ~6 s and
-                        # restarts the claim with a correctly-bound socket once Preferred.
+                    await asyncio.sleep(1.0)
+
+                if stop_event.is_set():
+                    return
 
                 ip_bytes = ipaddress.IPv4Address(local_ip).packed
                 log.info(
@@ -737,49 +706,34 @@ class VirtualCDJAnnouncer:
                     num,
                     _KEEPALIVE_INTERVAL,
                 )
-                _rebind_check_counter = 0
+                _kp_counter = 0
                 while not stop_event.is_set():
                     if not send(keepalive):
                         log.info("VirtualCDJ: network path changed, re-claiming player #%d", num)
                         break
                     await asyncio.sleep(_KEEPALIVE_INTERVAL)
-                    _rebind_check_counter += 1
+                    _kp_counter += 1
 
-                    # ── Case A: on INADDR_ANY for a link-local IP (Windows Tentative)
-                    # Probe every ~3 s; once bindable, restart the claim with the
-                    # correctly-bound socket so CDJs see the right source IP.
-                    if not _bind_ok and local_ip.startswith("169.254."):
-                        if _rebind_check_counter % 2 == 0:  # every ~3 s
-                            _rp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    # Periodic sanity-check: if a better (link-local) interface
+                    # appears while we are sending on a non-link-local IP
+                    # (e.g. Ethernet plugged in after app started), restart the
+                    # claim on the new interface.  Check every ~12 s.
+                    if not local_ip.startswith("169.254.") and _kp_counter % 8 == 0:
+                        _chk_ip, _chk_mac, _chk_bc = await asyncio.get_running_loop().run_in_executor(
+                            None, _get_network_info
+                        )
+                        if _chk_ip.startswith("169.254."):
+                            _probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                             try:
-                                _rp.bind((local_ip, 0))
-                                _rp.close()
+                                _probe.bind((_chk_ip, 0))
+                                _probe.close()
                                 log.info(
-                                    "VirtualCDJ: %s is now bindable — restarting claim with correct socket",
-                                    local_ip,
+                                    "VirtualCDJ: link-local address %s now bindable — "
+                                    "restarting claim on correct interface", _chk_ip,
                                 )
-                                _bind_ok = True
-                                break  # restart outer loop → re-claim via correct interface
+                                break
                             except OSError:
-                                _rp.close()
-
-                    # ── Case B: stuck on a non-link-local IP (Wi-Fi fallback)
-                    # This happens on Mac/Windows when the retry loop timed out
-                    # before APIPA was assigned (e.g. Ethernet just plugged in).
-                    # Check every ~12 s whether a 169.254.x.x address has appeared.
-                    # If so, break out and re-claim on the correct interface.
-                    elif not local_ip.startswith("169.254."):
-                        if _rebind_check_counter % 8 == 0:  # every ~12 s
-                            _chk_ip, _chk_mac, _chk_bc = await asyncio.get_running_loop().run_in_executor(
-                                None, _get_network_info
-                            )
-                            if _chk_ip.startswith("169.254."):
-                                log.info(
-                                    "VirtualCDJ: link-local address %s appeared — "
-                                    "restarting claim on correct interface",
-                                    _chk_ip,
-                                )
-                                break  # restart outer loop
+                                _probe.close()
 
                 if stop_event.is_set():
                     return
