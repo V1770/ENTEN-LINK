@@ -323,7 +323,7 @@ class VirtualCDJAnnouncer:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except AttributeError:
+            except (AttributeError, OSError):
                 pass
             try:
                 sock.bind((local_ip, 0))
