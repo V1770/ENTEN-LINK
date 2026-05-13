@@ -34,5 +34,5 @@ jobs:
       with:
         name: PioneerDJLink-Build
         path: |
-          dist\PioneerDJLink.exe
+          dist\PioneerDJLink\PioneerDJLink.exe
           packaging\windows\Output\PioneerDJLink-Setup.exe

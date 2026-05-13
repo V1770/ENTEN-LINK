@@ -60,11 +60,8 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
-    exclude_binaries=False,
+    exclude_binaries=True,
     name="PioneerDJLink",
     debug=False,
     bootloader_ignore_signals=False,
@@ -78,6 +75,15 @@ exe = EXE(
     entitlements_file=None,
     icon=str(ROOT / "packaging" / "windows" / "app.ico")
         if (ROOT / "packaging" / "windows" / "app.ico").exists() else None,
-    runtime_tmpdir=None,
-    onefile=True,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="PioneerDJLink",
 )

@@ -64,7 +64,7 @@ try {
     Write-Host "==> Running PyInstaller" -ForegroundColor Cyan
     & $venvPython -m PyInstaller --noconfirm --clean $specFile | Out-Host
 
-    $exePath = Join-Path $repoRoot "dist\PioneerDJLink.exe"
+    $exePath = Join-Path $repoRoot "dist\PioneerDJLink\PioneerDJLink.exe"
     if (-not (Test-Path $exePath)) {
         throw "Build failed: $exePath not produced."
     }
