@@ -45,6 +45,13 @@ class _StatusProtocol(asyncio.DatagramProtocol):
                 self._debug_non_status_packets += 1
             return
 
+        # Log first CDJ_STATUS per player at INFO so we can confirm delivery on both ports.
+        if pkt.device_number not in self._last_status_summary:
+            log.info(
+                "CDJ status (on :50002) from player %d @ %s track_id=%d slot=%d",
+                pkt.device_number, addr[0],
+                pkt.track_rekordbox_id, pkt.track_source_slot,
+            )
         if log.isEnabledFor(logging.DEBUG):
             summary = (
                 round(pkt.bpm, 2),

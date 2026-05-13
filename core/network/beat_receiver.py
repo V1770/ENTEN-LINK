@@ -6,6 +6,7 @@ import logging
 
 from core.network.constants import PORT_BEAT
 from core.network.packet_parser import PacketParser, PacketType
+from core.devices.player_state import PlayerState, PlayStateRaw
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +19,9 @@ class _BeatProtocol(asyncio.DatagramProtocol):
         self._debug_parse_fail_packets = 0
         self._debug_non_beat_packets = 0
         self._debug_precise_packets = 0
+        # CDJ-3000 sends CDJ_STATUS on 50001 (not 50002).  Track per-device to
+        # avoid duplicate INFO messages after the first one per player.
+        self._seen_cdj_status_players: set[int] = set()
 
     def datagram_received(self, data: bytes, addr: tuple) -> None:
         if self._debug_any_packets < 8:
@@ -51,10 +55,50 @@ class _BeatProtocol(asyncio.DatagramProtocol):
             )
             return
 
+        if pkt.type == PacketType.CDJ_STATUS:
+            # CDJ-3000 sends CDJ_STATUS on UDP 50001 rather than 50002.
+            # Handle it here so track metadata is available on CDJ-3000 networks.
+            if pkt.device_number not in self._seen_cdj_status_players:
+                self._seen_cdj_status_players.add(pkt.device_number)
+                log.info(
+                    "CDJ status (on :50001) from player %d @ %s track_id=%d slot=%d",
+                    pkt.device_number, addr[0],
+                    pkt.track_rekordbox_id, pkt.track_source_slot,
+                )
+            try:
+                raw_state = PlayStateRaw(pkt.play_state_byte)
+            except ValueError:
+                raw_state = PlayStateRaw.UNKNOWN
+            state = PlayerState(
+                player_number=pkt.device_number,
+                name=pkt.device_name,
+                ip_address=addr[0],
+                bpm=pkt.bpm,
+                pitch=pkt.pitch,
+                position_ms=pkt.position_ms,
+                beat_number=pkt.beat_number,
+                beat_in_bar=pkt.beat_in_bar,
+                play_state_raw=raw_state,
+                is_playing=pkt.is_playing,
+                is_master=pkt.is_master,
+                is_sync=pkt.is_sync,
+                is_on_air=pkt.is_on_air,
+                loop_active=pkt.loop_active,
+                master_tempo=pkt.master_tempo,
+                loop_start_ms=pkt.loop_start_ms,
+                loop_end_ms=pkt.loop_end_ms,
+                track_source_slot=pkt.track_source_slot,
+                track_source_player=pkt.track_source_player,
+                track_type=pkt.track_type,
+                track_rekordbox_id=pkt.track_rekordbox_id,
+            )
+            self._bus.player_state_updated.emit(pkt.device_number, state)
+            return
+
         if pkt.type != PacketType.BEAT:
             if self._debug_non_beat_packets < 5:
-                log.debug(
-                    "Ignoring UDP :50001 packet type=0x%02X len=%d from %s",
+                log.info(
+                    "Unexpected UDP :50001 packet type=0x%02X len=%d from %s — not handled",
                     int(pkt.type), len(data), addr[0],
                 )
                 self._debug_non_beat_packets += 1
