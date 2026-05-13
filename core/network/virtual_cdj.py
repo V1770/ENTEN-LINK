@@ -88,42 +88,48 @@ def _parse_ifconfig_interfaces() -> list[tuple[str, str, str, bytes, bool]]:
     return interfaces
 
 
+def _win_startupinfo():
+    """Return a STARTUPINFO that hides the console without breaking stdout."""
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = 0  # SW_HIDE
+    return si
+
+
 def _parse_ipconfig_interfaces() -> list[tuple[str, str, str, bytes, bool]]:
     """Windows equivalent of _parse_ifconfig_interfaces using 'ipconfig /all'."""
     try:
-        # STARTUPINFO hides the console window without breaking stdout capture.
-        # CREATE_NO_WINDOW (0x08000000) prevents stdout capture in windowless
-        # PyInstaller GUI builds, causing check_output to return None.
-        si = subprocess.STARTUPINFO()
-        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        si.wShowWindow = 0  # SW_HIDE
         out = subprocess.check_output(
-            ["ipconfig", "/all"], text=True, timeout=4,
-            stderr=subprocess.DEVNULL, startupinfo=si,
+            ["ipconfig", "/all"],
+            # Use errors="replace" to survive any code-page quirks in ipconfig output.
+            text=True, encoding="utf-8", errors="replace",
+            timeout=4, stderr=subprocess.DEVNULL, startupinfo=_win_startupinfo(),
         )
     except Exception as exc:
-        log.debug("Could not run ipconfig: %s", exc)
+        log.warning("Could not run 'ipconfig /all': %s", exc)
         return []
 
-    if not out:
-        log.debug("ipconfig returned no output")
+    if not out or not out.strip():
+        log.warning("'ipconfig /all' returned no output")
         return []
 
     interfaces: list[tuple[str, str, str, bytes, bool]] = []
-    # Split on adapter header lines (e.g. "Ethernet adapter Local Area Connection:")
+    # Split on adapter header lines.  ipconfig blocks start at column 0;
+    # property lines are indented with spaces.  Strip \r so CRLF is not an issue.
+    out = out.replace("\r", "")
     for block in re.split(r"\n(?=\S)", out):
-        # Extract adapter name
         header = re.match(r"^(.+adapter|.+interface)\s+(.+):\s*$", block, re.IGNORECASE)
         iface = header.group(2).strip() if header else "?"
 
         ip_m = re.search(r"(?:Autoconfiguration )?IPv4 Address[^:]*:\s*([\d.]+)", block)
         if not ip_m:
             continue
-        ip = ip_m.group(1).rstrip("(Preferred)")
+        # Strip "(Preferred)" suffix — use removesuffix, not rstrip (rstrip strips chars)
+        ip = ip_m.group(1)
+        ip = ip.removesuffix("(Preferred)").strip()
         if ip.startswith("127."):
             continue
 
-        # Subnet mask (dotted decimal on Windows) → convert to hex
         mask_m = re.search(r"Subnet Mask[^:]*:\s*([\d.]+)", block)
         if mask_m:
             try:
@@ -132,19 +138,41 @@ def _parse_ipconfig_interfaces() -> list[tuple[str, str, str, bytes, bool]]:
             except ValueError:
                 mask_hex = "0xffffff00"
         else:
-            mask_hex = "0xffffff00"
+            mask_hex = "0xffff0000" if ip.startswith("169.254.") else "0xffffff00"
 
-        # MAC address (Windows format: XX-XX-XX-XX-XX-XX)
         mac_m = re.search(r"Physical Address[^:]*:\s*([0-9A-Fa-f]{2}(?:[-:][0-9A-Fa-f]{2}){5})", block)
         if mac_m:
             mac = bytes(int(x, 16) for x in re.split(r"[-:]", mac_m.group(1)))
         else:
             mac = b"\x00" * 6
 
-        # Consider active if has a valid gateway or is media connected
         active = bool(re.search(r"Default Gateway[^:]*:\s*\d", block))
         interfaces.append((iface, ip, mask_hex, mac, active))
     return interfaces
+
+
+def _powershell_link_local_ip() -> str | None:
+    """Ask PowerShell for the machine's 169.254.x.x IP (Windows only).
+
+    More reliable than ipconfig text parsing — returns a bare IP string or None.
+    """
+    try:
+        cmd = (
+            "Get-NetIPAddress -AddressFamily IPv4 "
+            "| Where-Object { $_.IPAddress -like '169.254.*' } "
+            "| Select-Object -First 1 -ExpandProperty IPAddress"
+        )
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
+            text=True, timeout=6, stderr=subprocess.DEVNULL,
+            startupinfo=_win_startupinfo(),
+        )
+        ip = out.strip()
+        if ip.startswith("169.254."):
+            return ip
+    except Exception as exc:
+        log.warning("PowerShell Get-NetIPAddress failed: %s", exc)
+    return None
 
 
 def _get_network_info(target: str = "8.8.8.8") -> tuple[str, bytes, str]:
@@ -187,10 +215,20 @@ def _get_network_info(target: str = "8.8.8.8") -> tuple[str, bytes, str]:
         _s.close()
         if _ll_ip.startswith("169.254."):
             _mac, _mask, _bc = _mac_for_ip(_ll_ip)
-            log.debug("VirtualCDJ: link-local routing trick → %s broadcast=%s", _ll_ip, _bc)
+            log.info("VirtualCDJ: link-local routing trick → %s broadcast=%s", _ll_ip, _bc)
             return _ll_ip, _mac, _bc
-    except OSError:
-        pass
+        log.warning("VirtualCDJ: routing trick to 169.254.0.1 returned %s (not link-local)", _ll_ip)
+    except OSError as exc:
+        log.warning("VirtualCDJ: routing trick to 169.254.0.1 failed: %s", exc)
+
+    # ── 0.5 PowerShell Get-NetIPAddress — immune to ipconfig encoding issues ──
+    import sys as _sys
+    if _sys.platform == "win32":
+        _ps_ip = _powershell_link_local_ip()
+        if _ps_ip:
+            _mac, _mask, _bc = _mac_for_ip(_ps_ip)
+            log.info("VirtualCDJ: PowerShell found link-local %s broadcast=%s", _ps_ip, _bc)
+            return _ps_ip, _mac, _bc
 
     # ── 1. Prefer link-local (169.254.x.x) — Pioneer direct-connect subnet ──
     # On Windows, link-local adapters have no default gateway so active=False.
