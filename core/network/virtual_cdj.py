@@ -151,22 +151,29 @@ def _get_network_info(target: str = "8.8.8.8") -> tuple[str, bytes, str]:
     """Return (ip_str, mac_bytes, broadcast_ip) for the best LAN interface.
 
     Pioneer DJ Link devices use link-local addresses (169.254.x.x) for direct
-    (non-switch) connections.  We therefore prefer any *active* link-local
-    interface over the kernel-routing choice, which usually points at Wi-Fi
-    and is on a different subnet from the CDJs.
+    (non-switch) connections.  We prefer link-local regardless of whether the
+    adapter has a default gateway (it never does on Windows for link-local),
+    then fall back to a non-VPN LAN address, then anything non-loopback.
     """
+    def _is_vpn(ip: str) -> bool:
+        # Tailscale uses 100.64.0.0/10 CGNAT range; also skip loopback/APIPA
+        # that somehow has a gateway.
+        return ip.startswith("100.") or ip.startswith("127.")
+
     interfaces = _parse_ifconfig_interfaces()
 
-    # ── 1. Prefer active link-local interfaces (Pioneer direct-connect subnet) ──
-    for _, ip, mask, mac, active in interfaces:
-        if active and ip.startswith("169.254."):
+    # ── 1. Prefer link-local (169.254.x.x) — Pioneer direct-connect subnet ──
+    # On Windows, link-local adapters have no default gateway so active=False.
+    # We want them regardless.
+    for _, ip, mask, mac, _ in interfaces:
+        if ip.startswith("169.254."):
             broadcast = _subnet_broadcast(ip, mask)
             log.debug(
-                "VirtualCDJ interface: link-local %s broadcast=%s (preferred over routed)", ip, broadcast
+                "VirtualCDJ interface: link-local %s broadcast=%s", ip, broadcast
             )
             return ip, mac, broadcast
 
-    # ── 2. Fall back to the interface chosen by kernel routing ─────────────────
+    # ── 2. Routing-trick: follow kernel's choice, skip VPN/Tailscale ranges ──
     selected_ip: str | None = None
     selected_mac: bytes = b"\x00" * 6
     selected_mask = "0xffffff00"
@@ -177,27 +184,29 @@ def _get_network_info(target: str = "8.8.8.8") -> tuple[str, bytes, str]:
         s.connect((target, 80))
         _routed_ip = s.getsockname()[0]
         s.close()
-        for _, ip, mask, mac, _ in interfaces:
-            if ip == _routed_ip:
-                selected_ip, selected_mac, selected_mask = ip, mac, mask
-                break
+        if _routed_ip and not _is_vpn(_routed_ip):
+            for _, ip, mask, mac, _ in interfaces:
+                if ip == _routed_ip:
+                    selected_ip, selected_mac, selected_mask = ip, mac, mask
+                    break
     except OSError:
         pass
 
+    # ── 3. Any active non-VPN interface ──────────────────────────────────────
     if selected_ip is None:
         for _, ip, mask, mac, active in interfaces:
-            if active:
+            if active and not _is_vpn(ip):
                 selected_ip, selected_mac, selected_mask = ip, mac, mask
                 break
 
-    if selected_ip is None and interfaces:
-        _, selected_ip, selected_mask, selected_mac, _ = interfaces[0]
+    # ── 4. Any non-VPN interface ──────────────────────────────────────────────
+    if selected_ip is None:
+        for _, ip, mask, mac, _ in interfaces:
+            if not _is_vpn(ip):
+                selected_ip, selected_mac, selected_mask = ip, mac, mask
+                break
 
-    # ── 3. Platform-native fallback (Windows: ifconfig unavailable) ────────────
-    # ifconfig does not exist on Windows, so _parse_ifconfig_interfaces() returns
-    # an empty list and the routing-derived IP is never matched above.  Use it
-    # directly here so the VirtualCDJ announces from the real LAN IP instead of
-    # loopback — without this, CDJs on the network never see our keep-alives.
+    # ── 5. Windows fallback: ipconfig gave us nothing useful, use routing IP ──
     if selected_ip is None and _routed_ip and not _routed_ip.startswith("127."):
         selected_ip = _routed_ip
         try:
