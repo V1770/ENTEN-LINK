@@ -91,12 +91,22 @@ def _parse_ifconfig_interfaces() -> list[tuple[str, str, str, bytes, bool]]:
 def _parse_ipconfig_interfaces() -> list[tuple[str, str, str, bytes, bool]]:
     """Windows equivalent of _parse_ifconfig_interfaces using 'ipconfig /all'."""
     try:
+        # STARTUPINFO hides the console window without breaking stdout capture.
+        # CREATE_NO_WINDOW (0x08000000) prevents stdout capture in windowless
+        # PyInstaller GUI builds, causing check_output to return None.
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE
         out = subprocess.check_output(
             ["ipconfig", "/all"], text=True, timeout=4,
-            creationflags=0x08000000  # CREATE_NO_WINDOW — suppress console popup
+            stderr=subprocess.DEVNULL, startupinfo=si,
         )
     except Exception as exc:
         log.debug("Could not run ipconfig: %s", exc)
+        return []
+
+    if not out:
+        log.debug("ipconfig returned no output")
         return []
 
     interfaces: list[tuple[str, str, str, bytes, bool]] = []

@@ -19,8 +19,8 @@ class NetworkConfig:
     # Runtime value used by NetworkWorker. 0 = disabled/passive.
     virtual_cdj_player: int = 0
     # Default player number used when the app is launched with -t and --vp is omitted.
-    # Use a non-physical slot by default to avoid collisions with real decks.
-    default_virtual_cdj_player: int = 5
+    # Use slot 6 to avoid colliding with real CDJ decks (slots 1-4) or a 5th CDJ.
+    default_virtual_cdj_player: int = 6
 
 
 @dataclass

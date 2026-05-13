@@ -399,12 +399,13 @@ class MainWindow(QMainWindow):
         self._status_label.setStyleSheet(f"color: {C_TEXT_DIM};")
 
         if num not in self._decks:
-            # Slot outside configured display range (rare but possible).
-            # Log it; no UI panel is created dynamically — Phase 3 can handle this.
-            log.warning("Device on unhandled slot %d ('%s') — no deck panel", num, name)
-            self._status_label.setText(
-                f"Player {num} online — {name}  ({ip})  [slot outside display range]"
-            )
+            # Slot outside configured display range (mixer, gateway, etc.).
+            # Log only the first occurrence — keepalives repeat every 1.5 s.
+            if not hasattr(self, "_warned_slots"):
+                self._warned_slots: set[int] = set()
+            if num not in self._warned_slots:
+                self._warned_slots.add(num)
+                log.info("Device on slot %d ('%s') — outside display range, ignored", num, name)
             return
 
         self._decks[num].set_online(True)
