@@ -96,9 +96,9 @@ class _BeatProtocol(asyncio.DatagramProtocol):
             return
 
         if pkt.type != PacketType.BEAT:
-            if self._debug_non_beat_packets < 5:
-                log.info(
-                    "Unexpected UDP :50001 packet type=0x%02X len=%d from %s — not handled",
+            if self._debug_non_beat_packets < 3:
+                log.debug(
+                    "Ignoring UDP :50001 packet type=0x%02X len=%d from %s",
                     int(pkt.type), len(data), addr[0],
                 )
                 self._debug_non_beat_packets += 1
