@@ -24,8 +24,11 @@ class _BeatProtocol(asyncio.DatagramProtocol):
         self._seen_cdj_status_players: set[int] = set()
 
     def datagram_received(self, data: bytes, addr: tuple) -> None:
-        if self._debug_any_packets < 8:
-            log.debug("UDP :50001 packet len=%d from %s", len(data), addr[0])
+        if self._debug_any_packets < 5:
+            log.info("UDP :50001 packet #%d len=%d from %s", self._debug_any_packets + 1, len(data), addr[0])
+            self._debug_any_packets += 1
+        elif self._debug_any_packets == 5:
+            log.info("UDP :50001 packets arriving OK (further per-packet logs suppressed)")
             self._debug_any_packets += 1
 
         pkt = self._parser.parse(data)
