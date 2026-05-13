@@ -18,3 +18,8 @@ dist/
 
 # IDE
 .vscode/
+
+# Large vendor/reference folders
+beat-link-main/
+beat-link-trigger-main/
+reference_data/
