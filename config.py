@@ -56,7 +56,14 @@ config = AppConfig()
 
 
 def _config_path() -> Path:
-    return Path.home() / "Library" / "Application Support" / "Pioneer DJ Link" / "settings.json"
+    import sys, os
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA", Path.home()))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return base / "Pioneer DJ Link" / "settings.json"
 
 
 def _apply_dataclass_updates(target, values: dict) -> None:
