@@ -327,7 +327,7 @@ def _get_network_info(target: str = "8.8.8.8") -> tuple[str, bytes, str]:
                 _mac, _mask, _bc = _mac_for_ip(_any_ip)
                 log.info(
                     "VirtualCDJ: PowerShell found 169.254.x.x %s (Tentative) — "
-                    "will use INADDR_ANY + IP_UNICAST_IF  broadcast=%s",
+                    "will wait for it to become Preferred (or set a static IP)  broadcast=%s",
                     _any_ip, _bc,
                 )
                 return _any_ip, _mac, _bc
