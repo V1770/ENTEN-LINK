@@ -1,0 +1,36 @@
+name: Windows Build
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install Inno Setup
+      run: |
+        choco install innosetup --yes
+
+    - name: Run build script
+      run: |
+        powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: PioneerDJLink-Build
+        path: |
+          dist\PioneerDJLink\PioneerDJLink.exe
+          packaging\windows\Output\PioneerDJLink-Setup.exe

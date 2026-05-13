@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+.venv-win/
+
+# Logs
+*.log
+
+# PyInstaller build artifacts
+build/
+dist/
+
+# IDE
+.vscode/
