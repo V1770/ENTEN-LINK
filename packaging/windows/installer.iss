@@ -36,9 +36,8 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; \
     GroupDescription: "Additional shortcuts:"; Flags: checkedonce
 
 [Files]
-; Pull the entire PyInstaller one-folder build.
-Source: "..\..\dist\PioneerDJLink\*"; DestDir: "{app}"; \
-    Flags: ignoreversion recursesubdirs createallsubdirs
+; Single-file PyInstaller build — just copy the one exe.
+Source: "..\..\dist\PioneerDJLink.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"
