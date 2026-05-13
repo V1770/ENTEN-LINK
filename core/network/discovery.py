@@ -7,6 +7,7 @@ from typing import Optional
 
 from core.network.constants import PORT_ANNOUNCE
 from core.network.packet_parser import PacketParser, PacketType
+from core.network.virtual_cdj import add_link_local_peer
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +91,8 @@ class _DiscoveryProtocol(asyncio.DatagramProtocol):
 
         ip = pkt.ip_address or addr[0]
         log.debug("Announce #%d '%s' from %s", pkt.device_number, pkt.device_name, ip)
+        # Register link-local peers so VirtualCDJ can use them in routing tricks.
+        add_link_local_peer(ip)
         self._bus.device_discovered.emit(pkt.device_number, pkt.device_name, ip)
 
     def error_received(self, exc: Exception) -> None:

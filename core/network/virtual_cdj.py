@@ -38,6 +38,19 @@ from core.network.constants import MAGIC, PORT_ANNOUNCE
 
 log = logging.getLogger(__name__)
 
+# ── Module-level cache of known 169.254.x.x peer IPs ─────────────────────────
+# Populated by discovery when Pioneer devices are found on the network.
+# Used by _get_network_info() to do a routing trick to a KNOWN neighbor
+# (more reliable than 169.254.0.1 which has no ARP entry on this machine).
+_seen_link_local_peers: set[str] = set()
+
+
+def add_link_local_peer(ip: str) -> None:
+    """Register a peer 169.254.x.x IP seen on the network (called by discovery)."""
+    if ip.startswith("169.254."):
+        _seen_link_local_peers.add(ip)
+
+
 # ── Protocol layout constants (beat-link exact offsets) ──────────────────────
 _NAME_OFFSET = 0x0c   # 12 — DEVICE_NAME_OFFSET
 _NAME_LEN    = 0x14   # 20 — DEVICE_NAME_LENGTH
@@ -164,14 +177,19 @@ def _parse_ipconfig_interfaces() -> list[tuple[str, str, str, bytes, bool]]:
 
 
 def _powershell_link_local_ip() -> str | None:
-    """Ask PowerShell for the machine's 169.254.x.x IP (Windows only).
+    """Ask PowerShell for the machine's 169.254.x.x IP in Preferred state.
 
-    More reliable than ipconfig text parsing — returns a bare IP string or None.
+    Filters out Tentative/Duplicate addresses that WinSock refuses to bind.
+    Returns a bare IP string or None.
     """
     try:
+        # Only return addresses in 'Preferred' state — Tentative/Duplicate
+        # cause WinSock to reject bind() with WSAEADDRNOTAVAIL (10049).
         cmd = (
-            "Get-NetIPAddress -AddressFamily IPv4 "
-            "| Where-Object { $_.IPAddress -like '169.254.*' } "
+            "$a = Get-NetIPAddress -AddressFamily IPv4 "
+            "| Where-Object { $_.IPAddress -like '169.254.*' }; "
+            "$a | ForEach-Object { Write-Host (\"STATE:\"+$_.IPAddress+\":\"+$_.AddressState) }; "
+            "$a | Where-Object { $_.AddressState -eq 'Preferred' } "
             "| Select-Object -First 1 -ExpandProperty IPAddress"
         )
         out = subprocess.check_output(
@@ -179,9 +197,18 @@ def _powershell_link_local_ip() -> str | None:
             text=True, timeout=6, stderr=subprocess.DEVNULL,
             startupinfo=_win_startupinfo(),
         )
-        ip = out.strip()
-        if ip.startswith("169.254."):
-            return ip
+        for line in out.splitlines():
+            if line.startswith("STATE:"):
+                parts = line.split(":")
+                if len(parts) >= 3:
+                    log.info("VirtualCDJ: address %s state=%s", parts[1], parts[2])
+        # Last non-STATE line is the Preferred IP (if any)
+        ip_lines = [l.strip() for l in out.splitlines()
+                    if l.strip() and not l.startswith("STATE:")]
+        if ip_lines:
+            ip = ip_lines[-1]
+            if ip.startswith("169.254."):
+                return ip
     except Exception as exc:
         log.warning("PowerShell Get-NetIPAddress failed: %s", exc)
     return None
@@ -238,10 +265,25 @@ def _get_network_info(target: str = "8.8.8.8") -> tuple[str, bytes, str]:
         fallback_mac = _uuid.getnode().to_bytes(6, "big")
         return fallback_mac, "0xffff0000", "169.254.255.255"
 
-    # ── 0. Routing-trick to link-local space — most reliable on Windows ──────
-    # Ask the OS kernel which local IP it would use to reach 169.254.x.x.
-    # Works even when ipconfig parsing fails and is immune to Tailscale, because
-    # Tailscale does NOT claim the 169.254.0.0/16 route.
+    # ── 0. Routing-trick to KNOWN link-local peers (most reliable on Windows) ──
+    # Ask the OS which local IP it would use to reach each known CDJ IP.
+    # Windows has ARP entries for hosts it has already communicated with,
+    # so connect() to a known peer returns the correct source interface IP
+    # even when there is no 169.254.0.0/16 on-link route yet.
+    for _peer in list(_seen_link_local_peers):
+        try:
+            _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            _s.connect((_peer, 50000))
+            _ll_ip = _s.getsockname()[0]
+            _s.close()
+            if _ll_ip.startswith("169.254."):
+                _mac, _mask, _bc = _mac_for_ip(_ll_ip)
+                log.info("VirtualCDJ: routing trick to peer %s → %s broadcast=%s", _peer, _ll_ip, _bc)
+                return _ll_ip, _mac, _bc
+        except OSError:
+            pass
+
+    # ── 0.1 Routing-trick to generic link-local space ─────────────────────────
     try:
         _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         _s.connect(("169.254.0.1", 50000))
@@ -524,7 +566,33 @@ class VirtualCDJAnnouncer:
                 # DAD completes and PowerShell can see the address.
                 _ll_if_index = 0
                 _bind_ok = False
-                if local_ip.startswith("169.254."):
+                if not local_ip.startswith("169.254."):
+                    # Non-link-local: we got a bad IP (e.g. Wi-Fi). Retry
+                    # _get_network_info() for up to 60s hoping CDJ peers appear
+                    # in the ARP table and the routing trick starts working.
+                    for _attempt in range(12):
+                        await asyncio.sleep(5.0)
+                        _fresh_ip, _fresh_mac, _fresh_bc = await asyncio.get_running_loop().run_in_executor(
+                            None, _get_network_info
+                        )
+                        if _fresh_ip.startswith("169.254."):
+                            local_ip, local_mac, broadcast = _fresh_ip, _fresh_mac, _fresh_bc
+                            log.info(
+                                "VirtualCDJ: link-local IP resolved on attempt %d/12: %s broadcast=%s",
+                                _attempt + 1, local_ip, broadcast,
+                            )
+                            _bind_ok = True
+                            break
+                        log.info(
+                            "VirtualCDJ: still no link-local IP (attempt %d/12, got %s) — retrying in 5s",
+                            _attempt + 1, _fresh_ip,
+                        )
+                    else:
+                        log.warning(
+                            "VirtualCDJ: no link-local IP after 60s — proceeding with %s; "
+                            "CDJs may not respond with CDJ_STATUS", local_ip,
+                        )
+                else:
                     import sys as _sys
                     if _sys.platform == "win32":
                         _ll_if_index = await asyncio.get_running_loop().run_in_executor(
@@ -534,46 +602,51 @@ class VirtualCDJAnnouncer:
                             "VirtualCDJ: interface index for %s = %d",
                             local_ip, _ll_if_index,
                         )
-                    for _attempt in range(12):
-                        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                        try:
-                            probe.bind((local_ip, 0))
-                            probe.close()
-                            _bind_ok = True
-                            if _attempt > 0:
+                    # Probe bind() to confirm address is in Preferred state.
+                    # If it fails the address is Tentative/Duplicate; re-call
+                    # _get_network_info() which will return Preferred IP once ready.
+                    _probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    try:
+                        _probe.bind((local_ip, 0))
+                        _probe.close()
+                        _bind_ok = True
+                        log.info("VirtualCDJ: %s is bindable (Preferred state)", local_ip)
+                    except OSError:
+                        _probe.close()
+                        log.info(
+                            "VirtualCDJ: %s not yet bindable (Tentative/Duplicate?) — "
+                            "will retry via _get_network_info() every 5s for 60s",
+                            local_ip,
+                        )
+                        for _attempt in range(12):
+                            await asyncio.sleep(5.0)
+                            _fresh_ip, _fresh_mac, _fresh_bc = await asyncio.get_running_loop().run_in_executor(
+                                None, _get_network_info
+                            )
+                            # Try direct bind on the fresh IP too
+                            _rp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                            try:
+                                _rp.bind((_fresh_ip, 0))
+                                _rp.close()
+                                local_ip, local_mac, broadcast = _fresh_ip, _fresh_mac, _fresh_bc
+                                _bind_ok = True
                                 log.info(
                                     "VirtualCDJ: %s now bindable (attempt %d/12)",
                                     local_ip, _attempt + 1,
                                 )
-                            break
-                        except OSError as _exc:
-                            probe.close()
-                            if _attempt < 11:
+                                break
+                            except OSError:
+                                _rp.close()
                                 log.info(
-                                    "VirtualCDJ: %s not yet bindable (attempt %d/12, NIC still initialising) — retrying in 5s",
-                                    local_ip, _attempt + 1,
+                                    "VirtualCDJ: %s still not bindable (attempt %d/12) — retrying in 5s",
+                                    _fresh_ip, _attempt + 1,
                                 )
-                                await asyncio.sleep(5.0)
-                            else:
-                                log.warning(
-                                    "VirtualCDJ: %s still not bindable after 12 attempts (60s) — "
-                                    "proceeding with INADDR_ANY; CDJ_STATUS may not be received",
-                                    local_ip,
-                                )
-
-                    # After waiting, re-run network detection.  The Ethernet NIC
-                    # interface route (169.254.0.0/16) is often added to the
-                    # routing table only after APIPA completes, which is exactly
-                    # when the bind probe starts succeeding.  A fresh routing
-                    # trick will pick the correct source IP.
-                    if _bind_ok:
-                        local_ip, local_mac, broadcast = await asyncio.get_running_loop().run_in_executor(
-                            None, _get_network_info
-                        )
-                        log.info(
-                            "VirtualCDJ: post-DAD network re-check → IP=%s broadcast=%s",
-                            local_ip, broadcast,
-                        )
+                        else:
+                            log.warning(
+                                "VirtualCDJ: %s still not bindable after 12 attempts (60s) — "
+                                "using INADDR_ANY + IP_UNICAST_IF fallback",
+                                local_ip,
+                            )
 
                 ip_bytes = ipaddress.IPv4Address(local_ip).packed
                 log.info(
