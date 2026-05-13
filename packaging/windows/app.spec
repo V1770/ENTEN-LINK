@@ -55,6 +55,11 @@ a = Analysis(
     noarchive=False,
 )
 
+# Strip large Qt DLLs that cause decompression failures in one-file mode
+# and are not needed on machines with GPU drivers installed.
+_EXCLUDE_DLLS = {"opengl32sw.dll", "d3dcompiler_47.dll", "libpq.dll"}
+a.binaries = [b for b in a.binaries if b[0].lower().split("\\")[-1] not in _EXCLUDE_DLLS]
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
