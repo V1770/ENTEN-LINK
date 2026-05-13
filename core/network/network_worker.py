@@ -58,6 +58,13 @@ class NetworkWorker(QThread):
         status    = StatusReceiver(self._bus)
         beat      = BeatReceiver(self._bus)
 
+        def _on_task_done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                log.error("Network task '%s' crashed: %s", t.get_name(), exc, exc_info=exc)
+
         tasks = [
             asyncio.create_task(discovery.listen(self._stop_event), name="discovery"),
             asyncio.create_task(status.listen(self._stop_event),    name="status"),
@@ -74,6 +81,9 @@ class NetworkWorker(QThread):
             tasks.append(asyncio.create_task(
                 self._metadata_client.run(self._stop_event), name="metadata"
             ))
+
+        for t in tasks:
+            t.add_done_callback(_on_task_done)
 
         log.info("Network worker started — %d tasks active", len(tasks))
         await self._stop_event.wait()

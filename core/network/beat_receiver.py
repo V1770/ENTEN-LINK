@@ -154,7 +154,16 @@ class BeatReceiver:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         except (AttributeError, OSError):
             pass  # SO_REUSEPORT absent or unsupported on this platform/Python version
-        sock.bind(("", PORT_BEAT))
+        try:
+            sock.bind(("", PORT_BEAT))
+        except OSError as exc:
+            log.error(
+                "Beat receiver could not bind to UDP :%d — %s. "
+                "Is another DJ app (Rekordbox, previous instance) using this port?",
+                PORT_BEAT, exc,
+            )
+            sock.close()
+            raise
 
         transport, _ = await loop.create_datagram_endpoint(
             lambda: _BeatProtocol(self._bus, self._parser),
