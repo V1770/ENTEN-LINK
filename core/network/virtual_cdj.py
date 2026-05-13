@@ -743,13 +743,12 @@ class VirtualCDJAnnouncer:
                         log.info("VirtualCDJ: network path changed, re-claiming player #%d", num)
                         break
                     await asyncio.sleep(_KEEPALIVE_INTERVAL)
+                    _rebind_check_counter += 1
 
-                    # If we're on INADDR_ANY fallback, periodically probe whether
-                    # the link-local address is now bindable.  When it is, break
-                    # out and re-claim with the correctly-bound socket so CDJs
-                    # see the right source IP in keepalive packets.
+                    # ── Case A: on INADDR_ANY for a link-local IP (Windows Tentative)
+                    # Probe every ~6 s; once bindable, restart the claim with the
+                    # correctly-bound socket so CDJs see the right source IP.
                     if not _bind_ok and local_ip.startswith("169.254."):
-                        _rebind_check_counter += 1
                         if _rebind_check_counter % 4 == 0:  # every ~6 s
                             _rp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                             try:
@@ -763,6 +762,24 @@ class VirtualCDJAnnouncer:
                                 break  # restart outer loop → re-claim via correct interface
                             except OSError:
                                 _rp.close()
+
+                    # ── Case B: stuck on a non-link-local IP (Wi-Fi fallback)
+                    # This happens on Mac/Windows when the retry loop timed out
+                    # before APIPA was assigned (e.g. Ethernet just plugged in).
+                    # Check every ~12 s whether a 169.254.x.x address has appeared.
+                    # If so, break out and re-claim on the correct interface.
+                    elif not local_ip.startswith("169.254."):
+                        if _rebind_check_counter % 8 == 0:  # every ~12 s
+                            _chk_ip, _chk_mac, _chk_bc = await asyncio.get_running_loop().run_in_executor(
+                                None, _get_network_info
+                            )
+                            if _chk_ip.startswith("169.254."):
+                                log.info(
+                                    "VirtualCDJ: link-local address %s appeared — "
+                                    "restarting claim on correct interface",
+                                    _chk_ip,
+                                )
+                                break  # restart outer loop
 
                 if stop_event.is_set():
                     return
